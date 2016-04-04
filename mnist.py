@@ -15,7 +15,6 @@ a separate repository: https://github.com/Lasagne/Recipes
 from __future__ import print_function
 
 from matplotlib import pyplot as plt
-from time import gmtime
 
 import sys
 import os
@@ -27,16 +26,22 @@ import theano.tensor as T
 
 import lasagne
 
+out = 'out/' + str(int(time.time())) +'/'
+initialLearningRate = 0.2
+initialMomentum = 0.9
+decay = 0.5
+decayInterval = 5
+
 class Plot(object):
     count = 1
 
     def __init__(self, title, xlabel, ylabel):
+        self.title = title
+        self.xlabel = xlabel
+        self.ylabel = ylabel
         plt.figure(Plot.count)
         self.count = Plot.count
         Plot.count = Plot.count + 1
-        plt.title(title)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
         plt.plot([], [])
         plt.ion() # needed, otherwise .show() will freeze the execution
         plt.show()
@@ -47,10 +52,13 @@ class Plot(object):
         for (x0, y0, l0) in zip(x, y, labels):
             plt.plot(x0, y0, label=l0)
         plt.legend(loc='best')
+        plt.title(self.title)
+        plt.xlabel(self.xlabel)
+        plt.ylabel(self.ylabel)
         plt.draw()
 
     def save(self):
-        plt.figure(self.count).savefig(title + '-' + gmtime(0) + '.png')
+        plt.figure(self.count).savefig(out + self.title + '-' + str(int(time.time())) + '.png')
 
 
 # ################## Download and prepare the MNIST dataset ##################
@@ -131,18 +139,19 @@ def build_mlp(input_var=None):
 
     # Add a fully-connected layer of 800 units, using the linear rectifier, and
     # initializing weights with Glorot's scheme (which is the default anyway):
-    l_hid1 = lasagne.layers.DenseLayer(
+    l_hid1 = lasagne.layers.batch_norm(lasagne.layers.DenseLayer(
             l_in_drop, num_units=800,
             nonlinearity=lasagne.nonlinearities.rectify,
-            W=lasagne.init.GlorotUniform())
+            W=lasagne.init.HeNormal(gain='relu')))
 
     # We'll now add dropout of 50%:
     l_hid1_drop = lasagne.layers.DropoutLayer(l_hid1, p=0.5)
 
     # Another 800-unit layer:
-    l_hid2 = lasagne.layers.DenseLayer(
+    l_hid2 = lasagne.layers.batch_norm(lasagne.layers.DenseLayer(
             l_hid1_drop, num_units=800,
-            nonlinearity=lasagne.nonlinearities.rectify)
+            nonlinearity=lasagne.nonlinearities.rectify,
+            W=lasagne.init.HeNormal(gain='relu')))
 
     # 50% dropout again:
     l_hid2_drop = lasagne.layers.DropoutLayer(l_hid2, p=0.5)
@@ -206,12 +215,17 @@ def main(num_epochs=50):
 
     # We could add some weight decay as well here, see lasagne.regularization.
 
+
+    # Create a shared Theano variable for the learning rate that we can decay
+    # as we iterate through epochs
+    eta = theano.shared(np.array(initialLearningRate, dtype=theano.config.floatX))
+
     # Create update expressions for training, i.e., how to modify the
     # parameters at each training step. Here, we'll use Stochastic Gradient
     # Descent (SGD) with Nesterov momentum, but Lasagne offers plenty more.
     params = lasagne.layers.get_all_params(network, trainable=True)
     updates = lasagne.updates.nesterov_momentum(
-            loss, params, learning_rate=0.01, momentum=0.9)
+            loss, params, learning_rate=eta, momentum=initialMomentum)
 
     # Create a loss expression for validation/testing. The crucial difference
     # here is that we do a deterministic forward pass through the network,
@@ -243,6 +257,10 @@ def main(num_epochs=50):
     print("Starting training...")
     # We iterate over epochs:
     for epoch in range(num_epochs):
+        # every 5 epochs, half our learning rate
+        if epoch % decayInterval == 0 and epoch > 0:
+            eta.set_value(eta.get_value() * decay)
+
         # In each epoch, we do a full pass over the training data:
         train_err = 0
         train_batches = 0
@@ -279,6 +297,7 @@ def main(num_epochs=50):
         # Then we print the results for this epoch:
         print("Epoch {} of {} took {:.3f}s".format(
             epoch + 1, num_epochs, time.time() - start_time))
+        print("  learning rate:\t\t{0}".format(eta.get_value()))
         print("  training loss:\t\t{:.6f}".format(train_err / train_batches))
         print("  training accuracy:\t\t{:.2f} %".format(
             train_acc / train_batches * 100))
@@ -301,8 +320,20 @@ def main(num_epochs=50):
     print("  test accuracy:\t\t{:.2f} %".format(
         test_acc / test_batches * 100))
 
+    if not os.path.exists(out):
+        os.makedirs(out)
+
     loss_plot.save()
     acc_plot.save()
+
+    f = open(out + 'log.txt', 'w')
+    f.write('Epochs:\t\t' + str(epoch))
+    f.write('\nDecay learning rate by ' + str(decay) + ' every ' + str(decayInterval) + ' epochs. Batch norm.')
+    f.write('\nInitial learning rate:\t\t' + str(initialLearningRate))
+    f.write('\nInitial momentum:\t\t' + str(initialMomentum))
+    f.write('\nFinal test loss:\t\t' + str((test_err / test_batches)))
+    f.write('\nFinal test accuracy:\t\t' + str(test_acc / test_batches * 100))
+    f.close()
 
     # Optionally, you could now dump the network weights to a file like this:
     # np.savez('model.npz', *lasagne.layers.get_all_param_values(network))
@@ -321,6 +352,6 @@ if __name__ == '__main__':
         print("EPOCHS: number of training epochs to perform (default: 500)")
     else:
         kwargs = {}
-        if len(sys.argv) > 2:
-            kwargs['num_epochs'] = int(sys.argv[2])
+        if len(sys.argv) > 1:
+            kwargs['num_epochs'] = int(sys.argv[1])
         main(**kwargs)
